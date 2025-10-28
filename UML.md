@@ -15,6 +15,8 @@ classDiagram
       +currentPageId
       +initializeApp()
       +setupEventListeners()
+      +collectCircleScores()
+      +collectStories()
       +submitFinalData()
       +openGacha()
       +closeGacha()
@@ -42,6 +44,17 @@ classDiagram
       +loadInventory()
       +saveInventory()
       +addToInventory(item)
+    }
+
+    class SubmissionPayload {
+      +scores
+      +happyStory
+      +sadStory
+      +audioData
+      +browserId
+      +ipAddress
+      +sessionId
+      +toRequestBody()
     }
 
     class UIComponents {
@@ -75,8 +88,12 @@ classDiagram
     }
 
     class GeminiService {
-      +generate(member,scores,depth)
+      +generate(member,scores,happy,sad,depth)
       +selfTest()
+    }
+
+    class PromptBuilder {
+      +buildPrompt(member,scores,happy,sad,coach,depth)
     }
 
     %% Utilities
@@ -92,33 +109,44 @@ classDiagram
     AppController --> AudioManager : delegates audio
     AppController --> GachaManager : delegates gacha
     AppController --> Inventory : reads/writes
+    AppController --> SubmissionPayload : builds
 
+    SubmissionPayload --> GSHandler : submit()
     GachaManager --> GSHandler : logPull()
     GSHandler --> DriveService : upload audio
     GSHandler --> SheetService : append/update rows
     GSHandler --> GeminiService : generate feedback
     GSHandler --> CacheServiceWrapper : store cache
     GSHandler --> Utils : uses
+    GSHandler --> PromptBuilder : build prompt
+    PromptBuilder --> GeminiService : format request
 
-  AudioManager --> Utils : mimeToExt
-  Inventory --> CacheServiceWrapper : optional
+    AudioManager --> Utils : mimeToExt
+    Inventory --> CacheServiceWrapper : optional
 ```
 
 ---
 
-> Note: `GSHandler` represents the Apps Script backend (implements `doPost`, audio save helpers, gacha logging, and Gemini feedback helpers). It's represented as a logical class in the diagram but lives in `shareable/codegs.js`.
+> Notes:
+> - `SubmissionPayload` is a conceptual wrapper for the object built in `submitFinalData` before making the POST request; it holds Circle of Life scores, happy/sad stories, audio, and identifiers.
+> - `GSHandler` represents the Apps Script backend (implements `doPost`, audio save helpers, gacha logging, and Gemini feedback helpers) in `shareable/codegs.js`.
+> - `PromptBuilder` encapsulates the prompt that combines scores + stories before calling Gemini inside `handleGeminiFeedback`.
 
 ## Sequence: Submission Flow (simplified)
 
 ```mermaid
 sequenceDiagram
     participant UI as Frontend (AppController)
+  participant Payload as SubmissionPayload
     participant G as GSHandler (Apps Script)
     participant Drive as Google Drive
     participant SheetP as Public Sheet
     participant SheetPr as Private Sheet
     participant Gemini as GeminiService
+  participant Prompt as PromptBuilder
 
+  UI->>Payload: collectCircleScores()+collectStories()
+  Payload-->>UI: request body (scores, stories, audio, ids)
     UI->>G: POST / doPost(payload)  // submit (scores, stories, audioBase64, browserId, sessionId)
     G->>Drive: _saveAudioIfAny(base64) -> fileMeta
     G->>SheetP: appendRow(publicRow w/ audioUrl + reqId)
@@ -128,7 +156,9 @@ sequenceDiagram
     G->>UI: 200 OK { status: success, reqId }
     Note over G,Gemini: optionally call handleGeminiFeedback (separate action)
     UI->>G: POST action=geminiFeedback (reqId)
-    G->>Gemini: generate(member,scores,depth)
+  G->>Prompt: buildPrompt(scores,happy,sad,coach,depth)
+  Prompt-->>G: prompt text
+  G->>Gemini: generate(member,scores,happy,sad,depth)
     Gemini-->>G: text
     G->>SheetP: updateByReqId(reqId, aiShort/aiLong, text)
     G->>SheetPr: updateByReqId(reqId, aiShort/aiLong, text)
@@ -161,13 +191,15 @@ sequenceDiagram
 - GachaManager → `shareable/main.js` (functions: setupGacha, startPullAnimation, handle results)
 - AudioManager → `shareable/main.js` (initializeAudio, loadTrack, togglePlayPause)
 - Inventory → `shareable/main.js` (sessionStorage helpers: loadInventory, saveInventory, addToInventory)
+- SubmissionPayload → `shareable/main.js` (object assembled in `submitFinalData` before POST; holds scores, stories, audio, ids)
 - UIComponents → `shareable/main.js` (renderInventory, UI helpers)
 - GSHandler → `shareable/codegs.js` (doPost, handleGeminiFeedback, handleGachaLog)
-- DriveService → `shareable/codegs.js` (encapsulated in _saveAudioIfAny)
-- SheetService → `shareable/codegs.js` (_mustSheet, _appendRowSafe, _updateAiFeedbackByReqId)
+- DriveService → `shareable/codegs.js` (encapsulated in \_saveAudioIfAny)
+- SheetService → `shareable/codegs.js` (\_mustSheet, \_appendRowSafe, \_updateAiFeedbackByReqId)
 - CacheServiceWrapper → `shareable/codegs.js` (CacheService.getScriptCache usage)
-- GeminiService → `shareable/codegs.js` (callGemini_, geminiFeedbackSelfTestAll)
-- Utils → `shareable/codegs.js` and `shareable/main.js` (normalizeScores_, safeCell_, mimeToExt_, buildSubmitSig_)
+- PromptBuilder → `shareable/codegs.js` (`handleGeminiFeedback` builds prompts combining scores + stories)
+- GeminiService → `shareable/codegs.js` (callGemini\_, geminiFeedbackSelfTestAll)
+- Utils → `shareable/codegs.js` and `shareable/main.js` (normalizeScores*, safeCell*, mimeToExt*, buildSubmitSig*)
 
 ---
 
